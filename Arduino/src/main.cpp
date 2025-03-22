@@ -1,188 +1,278 @@
+// gesture 기능을 제거한 아두이노 코드
 #include <Arduino.h>
+#include "PinChangeInterrupt.h"
 #include <TaskScheduler.h>
-#include <PinChangeInterrupt.h>
 
-// -------------------------
-// 핀 정의
-// -------------------------
-#define LED_RED_PIN    11
-#define LED_YELLOW_PIN 10
-#define LED_GREEN_PIN  9
-#define POTENTIOMETER  A0  // 가변저항 핀 정의
+// LED 및 버튼 핀 설정
+#define LED_RED 11
+#define LED_YELLOW 10
+#define LED_GREEN 9
+#define BTN_1 4
+#define BTN_2 3
+#define BTN_3 2
+#define POT A0
 
-#define BTN_MODE1      4
-#define BTN_MODE2      3
-#define BTN_MODE3      2
-
-// -------------------------
-// 작업 주기 설정 (밀리초)
-// -------------------------
-#define STATE_UPDATE_INTERVAL 10
+int currentMode = 0;
+int timeRed = 2000, timeYellow = 500, timeGreen = 2000;
+int brightness = 255;
+int stateRed = 0, stateYellow = 0, stateGreen = 0;
 
 Scheduler scheduler;
 
-// -------------------------
-// LED 상태 및 신호등 FSM 설정
-// -------------------------
-enum LEDState { OFF, RED, YELLOW, GREEN };
-enum TrafficState { RED_ON, YELLOW_ON, GREEN_ON, GREEN_HOLD, GREEN_BLINK, YELLOW2_ON };
+void deactivateAllTasks();
+void updateBrightness();
+void processSerialInput();
+void runRedLED();
+void runYellowLED();
+void runGreenLED();
+void blinkGreenLED();
+void runYellowLED2();
+void modeRedOnly();
+void modeAllBlink();
 
-volatile LEDState currentLED = RED;
-volatile TrafficState trafficState = RED_ON;
-volatile bool isMode1 = false, isMode2 = false, isMode3 = false;
-volatile bool isRedOnlyMode = false; // 모드 1
-volatile bool isAllBlinkMode = false; // 모드 2
-volatile bool isAllOffMode = false; // 모드 3
+Task taskRedLED(10, TASK_FOREVER, &runRedLED, &scheduler, false);
+Task taskYellowLED(10, TASK_FOREVER, &runYellowLED, &scheduler, false);
+Task taskGreenLED(10, TASK_FOREVER, &runGreenLED, &scheduler, false);
+Task taskGreenBlink(10, TASK_FOREVER, &blinkGreenLED, &scheduler, false);
+Task taskYellowLED2(10, TASK_FOREVER, &runYellowLED2, &scheduler, false);
+Task taskBlinkAllLED(10, TASK_FOREVER, &modeAllBlink, &scheduler, false);
+Task taskCheckSerial(100, TASK_FOREVER, &processSerialInput, &scheduler, true);
+Task taskModeRedOnly(10, TASK_FOREVER, &modeRedOnly, &scheduler, false);
 
-unsigned long stateTimer = 0;
-unsigned int durationRed = 500, durationYellow = 2000, durationGreen = 500, durationGreenHold = 2000, flickerInterval = 500;
-int flickerCount = 0;
-volatile float outputVoltage = 5.0; // 출력 전압 변수 (0~5V)
-
-// 🔹 **p5.js와 연동하기 위한 LED 상태 전송 함수 추가**
-void sendLEDStateToSerial() {
-    String state;
-    if (isAllBlinkMode) state = "LED: ALL_ON";
-    else if (isAllOffMode) state = "LED: ALL_OFF";
-    else if (isRedOnlyMode) state = "LED: RED";
-    else if (currentLED == RED) state = "LED: RED";
-    else if (currentLED == YELLOW) state = "LED: YELLOW";
-    else if (currentLED == GREEN) state = "LED: GREEN";
-    else state = "LED: OFF";
-
-    Serial.println(state);
+void onPressBtn1() {
+  if (currentMode != 1) {
+    currentMode = 1;
+    deactivateAllTasks();
+    taskModeRedOnly.enable();
+  } else {
+    currentMode = 0;
+    deactivateAllTasks();
+    taskRedLED.enable();
+  }
 }
 
-// 🔹 **LED를 설정한 후 시리얼 데이터 전송**
-void setLED(int r, int y, int g) {
-    float redVoltage = (r / 255.0) * outputVoltage;
-    float yellowVoltage = (y / 255.0) * outputVoltage;
-    float greenVoltage = (g / 255.0) * outputVoltage;
-    
-    analogWrite(LED_RED_PIN, (redVoltage / 5.0) * 255);
-    analogWrite(LED_YELLOW_PIN, (yellowVoltage / 5.0) * 255);
-    analogWrite(LED_GREEN_PIN, (greenVoltage / 5.0) * 255);
-
-    sendLEDStateToSerial(); // LED 변경될 때마다 상태 전송
+void onPressBtn2() {
+  if (currentMode != 2) {
+    currentMode = 2;
+    deactivateAllTasks();
+    taskBlinkAllLED.enable();
+  } else {
+    currentMode = 0;
+    deactivateAllTasks();
+    taskRedLED.enable();
+  }
 }
 
-void renderLED() {
-    int rawBrightness = analogRead(POTENTIOMETER);
-    outputVoltage = map(rawBrightness, 0, 1023, 0, 500) / 100.0; // 0~5V 변환
-
-    if (isAllBlinkMode) { // Mode 2: 모든 LED 깜빡임
-        static unsigned long lastToggleTime = millis();
-        static bool isOn = false;
-        if (millis() - lastToggleTime >= 500) { 
-            isOn = !isOn;
-            lastToggleTime = millis();
-        }
-        if (isOn) {
-            setLED(255, 255, 255);
-        } else {
-            setLED(0, 0, 0);
-        }
-        return;
-    }
-
-    if (isRedOnlyMode) { // Mode 1: Red LED 켜짐
-        setLED(255, 0, 0);
-        return;
-    }
-
-    if (isAllOffMode) { // Mode 3: 모든 LED OFF
-        setLED(0, 0, 0);
-        return;
-    }
-
-    // 기본 모드 (신호등)
-    switch (currentLED) {
-        case RED: setLED(255, 0, 0); break;
-        case YELLOW: setLED(0, 255, 0); break;
-        case GREEN: setLED(0, 0, 255); break;
-        default: setLED(0, 0, 0); break;
-    }
+void onPressBtn3() {
+  currentMode = (currentMode == 3) ? 0 : 3;
+  deactivateAllTasks();
+  if (currentMode == 0) {
+    taskRedLED.enable();
+  }
 }
-
-// 기본 신호등 모드 업데이트
-void updateTrafficState() {
-    if (isRedOnlyMode || isAllBlinkMode || isAllOffMode) return; // 다른 모드가 활성화되었으면 기본 모드 동작 중지
-
-    unsigned long now = millis();
-    if (now - stateTimer < ((trafficState == RED_ON) ? durationRed : 
-                             (trafficState == GREEN_ON) ? durationGreen : 
-                             (trafficState == GREEN_HOLD) ? durationGreenHold : 
-                             (trafficState == GREEN_BLINK) ? flickerInterval : durationYellow)) return;
-    stateTimer = now;
-
-    switch (trafficState) {
-        case RED_ON: 
-            currentLED = RED; 
-            trafficState = YELLOW_ON; 
-            break;
-        case YELLOW_ON: 
-            currentLED = YELLOW; 
-            trafficState = GREEN_ON; 
-            break;
-        case GREEN_ON: 
-            currentLED = GREEN; 
-            trafficState = GREEN_HOLD; 
-            break;
-        case GREEN_HOLD:
-            currentLED = GREEN;
-            trafficState = GREEN_BLINK;
-            flickerCount = 0;
-            break;
-        case GREEN_BLINK:
-            currentLED = (currentLED == GREEN) ? OFF : GREEN;
-            if (++flickerCount >= 6) { // ON/OFF 총 6회 (3회 깜빡임)
-                trafficState = YELLOW2_ON;
-            }
-            break;
-        case YELLOW2_ON: 
-            currentLED = YELLOW; 
-            trafficState = RED_ON; 
-            break;
-    }
-    sendLEDStateToSerial(); // 상태 변경될 때마다 시리얼 전송
-}
-
-// 버튼 핸들러 (토글 방식)
-void buttonHandler1() {
-    isRedOnlyMode = !isRedOnlyMode;
-    sendLEDStateToSerial();
-}
-
-void buttonHandler2() {
-    isAllBlinkMode = !isAllBlinkMode;
-    sendLEDStateToSerial();
-}
-
-void buttonHandler3() {
-    isAllOffMode = !isAllOffMode;
-    sendLEDStateToSerial();
-}
-
-Task taskUpdateState(STATE_UPDATE_INTERVAL, TASK_FOREVER, updateTrafficState);
 
 void setup() {
-    Serial.begin(9600);
-    pinMode(LED_RED_PIN, OUTPUT);
-    pinMode(LED_YELLOW_PIN, OUTPUT);
-    pinMode(LED_GREEN_PIN, OUTPUT);
-    pinMode(POTENTIOMETER, INPUT);
-    pinMode(BTN_MODE1, INPUT_PULLUP);
-    pinMode(BTN_MODE2, INPUT_PULLUP);
-    pinMode(BTN_MODE3, INPUT_PULLUP);
-    attachPCINT(digitalPinToPCINT(BTN_MODE1), buttonHandler1, FALLING);
-    attachPCINT(digitalPinToPCINT(BTN_MODE2), buttonHandler2, FALLING);
-    attachPCINT(digitalPinToPCINT(BTN_MODE3), buttonHandler3, FALLING);
-    scheduler.init();
-    scheduler.addTask(taskUpdateState);
-    taskUpdateState.enable();
+  Serial.begin(9600);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(BTN_1, INPUT_PULLUP);
+  pinMode(BTN_2, INPUT_PULLUP);
+  pinMode(BTN_3, INPUT_PULLUP);
+  pinMode(POT, INPUT);
+  attachPCINT(digitalPinToPCINT(BTN_1), onPressBtn1, FALLING);
+  attachPCINT(digitalPinToPCINT(BTN_2), onPressBtn2, FALLING);
+  attachPCINT(digitalPinToPCINT(BTN_3), onPressBtn3, FALLING);
+  taskRedLED.enable();
 }
 
 void loop() {
-    renderLED();
-    scheduler.execute();
+  scheduler.execute();
+  updateBrightness();
+  Serial.println(String(currentMode) + "," + String(stateRed) + "," + String(stateYellow) + "," + String(stateGreen) + "," + String(brightness)); 
+}
+
+void deactivateAllTasks() {
+  taskRedLED.disable();
+  taskYellowLED.disable();
+  taskGreenLED.disable();
+  taskGreenBlink.disable();
+  taskYellowLED2.disable();
+  taskBlinkAllLED.disable();
+  taskModeRedOnly.disable();
+  analogWrite(LED_RED, 0);
+  analogWrite(LED_YELLOW, 0);
+  analogWrite(LED_GREEN, 0);
+  stateRed = stateYellow = stateGreen = 0;
+}
+
+void updateBrightness() {
+  int potValue = analogRead(POT);
+  brightness = map(potValue, 0, 1023, 0, 255);
+}
+
+void processSerialInput() {
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\n');
+    int newRedTime, newYellowTime, newGreenTime, newMode;
+    if (sscanf(data.c_str(), "%d,%d,%d,%d", &newRedTime, &newYellowTime, &newGreenTime, &newMode) == 4) {
+      timeRed = newRedTime;
+      timeYellow = newYellowTime;
+      timeGreen = newGreenTime;
+      if (newMode != currentMode) {
+        currentMode = newMode;
+        if (currentMode == 1) { deactivateAllTasks(); taskModeRedOnly.enable(); }
+        else if (currentMode == 2) { deactivateAllTasks(); taskBlinkAllLED.enable(); }
+        else if (currentMode == 3) { deactivateAllTasks(); }
+        else if (currentMode == 0) { deactivateAllTasks(); taskRedLED.enable(); }
+      }
+    }
+  }
+}
+
+void runRedLED() {
+  static unsigned long startTime = 0;
+  static bool isOn = false;
+  if (currentMode != 0) { isOn = false; return; }
+  if (!isOn) {
+    analogWrite(LED_RED, brightness);
+    stateRed = 1;
+    startTime = millis();
+    isOn = true;
+  } else {
+    analogWrite(LED_RED, brightness);
+    if (millis() - startTime >= (unsigned long)timeRed) {
+      analogWrite(LED_RED, 0);
+      stateRed = 0;
+      isOn = false;
+      taskRedLED.disable();
+      taskYellowLED.enable();
+    }
+  }
+}
+
+void runYellowLED() {
+  static unsigned long startTime = 0;
+  static bool isOn = false;
+  if (currentMode != 0) { isOn = false; return; }
+  if (!isOn) {
+    analogWrite(LED_YELLOW, brightness);
+    stateYellow = 1;
+    startTime = millis();
+    isOn = true;
+  } else {
+    analogWrite(LED_YELLOW, brightness);
+    if (millis() - startTime >= (unsigned long)timeYellow) {
+      analogWrite(LED_YELLOW, 0);
+      stateYellow = 0;
+      isOn = false;
+      taskYellowLED.disable();
+      taskGreenLED.enable();
+    }
+  }
+}
+
+void runGreenLED() {
+  static unsigned long startTime = 0;
+  static bool isOn = false;
+  if (currentMode != 0) { isOn = false; return; }
+  if (!isOn) {
+    analogWrite(LED_GREEN, brightness);
+    stateGreen = 1;
+    startTime = millis();
+    isOn = true;
+  } else {
+    analogWrite(LED_GREEN, brightness);
+    if (millis() - startTime >= (unsigned long)timeGreen) {
+      analogWrite(LED_GREEN, 0);
+      stateGreen = 0;
+      isOn = false;
+      taskGreenLED.disable();
+      taskGreenBlink.enable();
+    }
+  }
+}
+
+void blinkGreenLED() {
+  static int toggleCount = 0;
+  static unsigned long lastToggleTime = 0;
+  const unsigned long interval = 143UL;
+
+  if (currentMode != 0) { toggleCount = 0; return; }
+
+  if (millis() - lastToggleTime >= interval) {
+    lastToggleTime = millis();
+    if (toggleCount % 2 == 0) {
+      analogWrite(LED_GREEN, 0);
+      stateGreen = 0;
+    } else {
+      analogWrite(LED_GREEN, brightness);
+      stateGreen = 1;
+    }
+    toggleCount++;
+  }
+  if (toggleCount >= 7) {
+    analogWrite(LED_GREEN, 0);
+    stateGreen = 0;
+    toggleCount = 0;
+    taskGreenBlink.disable();
+    taskYellowLED2.enable();
+  }
+}
+
+void runYellowLED2() {
+  static unsigned long startTime = 0;
+  static bool isOn = false;
+  if (currentMode != 0) { isOn = false; return; }
+  if (!isOn) {
+    analogWrite(LED_YELLOW, brightness);
+    stateYellow = 1;
+    startTime = millis();
+    isOn = true;
+  } else {
+    analogWrite(LED_YELLOW, brightness);
+    if (millis() - startTime >= (unsigned long)timeYellow) {
+      analogWrite(LED_YELLOW, 0);
+      stateYellow = 0;
+      isOn = false;
+      taskYellowLED2.disable();
+      taskRedLED.enable();
+    }
+  }
+}
+
+void modeAllBlink() {
+  static unsigned long toggleTimer = 0;
+  static bool ledOn = false;
+
+  if (currentMode != 2) { ledOn = false; return; }
+
+  if (millis() - toggleTimer >= 500UL) {
+    toggleTimer = millis();
+    ledOn = !ledOn;
+    if (ledOn) {
+      analogWrite(LED_RED, brightness);
+      analogWrite(LED_YELLOW, brightness);
+      analogWrite(LED_GREEN, brightness);
+      stateRed = stateYellow = stateGreen = 1;
+    } else {
+      analogWrite(LED_RED, 0);
+      analogWrite(LED_YELLOW, 0);
+      analogWrite(LED_GREEN, 0);
+      stateRed = stateYellow = stateGreen = 0;
+    }
+  } else {
+    if (ledOn) {
+      analogWrite(LED_RED, brightness);
+      analogWrite(LED_YELLOW, brightness);
+      analogWrite(LED_GREEN, brightness);
+    }
+  }
+}
+
+void modeRedOnly() {
+  if (currentMode == 1) {
+    analogWrite(LED_RED, brightness);
+    stateRed = 1;
+  }
 }

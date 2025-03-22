@@ -1,72 +1,90 @@
-let serial;
-let ledState = "OFF"; // 기본 LED 상태
+// sketch.js (제스처 기능 제외 버전)
+let serialPort, writer, reader;
+let redSlider, yellowSlider, greenSlider;
+let currentMode = 0;
+let dataBuffer = "";
 
 function setup() {
-    createCanvas(400, 200);
+  noCanvas();
 
-    // p5 SerialPort 설정
-    serial = new p5.SerialPort();
-    serial.on("list", gotList);  // 포트 목록 받기
-    serial.on("data", serialEvent);  // 데이터 수신
-    serial.on("open", () => console.log("✅ Serial Port Open"));
-    serial.on("error", (err) => console.error("❌ Serial Port Error:", err));
+  redSlider = document.getElementById("redSlider");
+  yellowSlider = document.getElementById("yellowSlider");
+  greenSlider = document.getElementById("greenSlider");
 
-    // 사용 가능한 포트 목록 확인 후 자동 연결
-    serial.list();
-    serial.open("COM4");  // 아두이노 연결된 포트 (필요 시 수정)
+  redSlider.addEventListener("input", updateTimes);
+  yellowSlider.addEventListener("input", updateTimes);
+  greenSlider.addEventListener("input", updateTimes);
+
+  document
+    .getElementById("connectButton")
+    .addEventListener("click", connectToArduino);
 }
 
-function draw() {
-    background(30);
-    fill(255);
-    textSize(20);
-    textAlign(CENTER, CENTER);
-    text("LED 상태: " + ledState, width / 2, height / 2);
-    
-    updateTrafficLight();
+function updateTimes() {
+  if (currentMode === 0) {
+    document.getElementById("redTime").textContent = redSlider.value;
+    document.getElementById("yellowTime").textContent = yellowSlider.value;
+    document.getElementById("greenTime").textContent = greenSlider.value;
+    sendData();
+  }
 }
 
-function serialEvent() {
-    let data = serial.readLine();
-    if (data) {
-        data = data.trim();
-        console.log("Received Data: ", data);
-        if (data.startsWith("LED: ")) {
-            ledState = data.split("LED: ")[1];
-        }
+async function connectToArduino() {
+  try {
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 9600 });
+    writer = serialPort.writable.getWriter();
+    reader = serialPort.readable.getReader();
+    console.log("Connected to Arduino!");
+    readData();
+  } catch (err) {
+    console.error("Connection failed:", err);
+  }
+}
+
+async function sendData() {
+  if (writer) {
+    let data = `${redSlider.value},${yellowSlider.value},${greenSlider.value},${currentMode}\n`;
+    await writer.write(new TextEncoder().encode(data));
+    console.log("🔄 데이터 전송:", data);
+  }
+}
+
+async function readData() {
+  while (serialPort.readable) {
+    try {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      let chunk = new TextDecoder().decode(value);
+      dataBuffer += chunk;
+
+      let lines = dataBuffer.split("\n");
+      while (lines.length > 1) {
+        let line = lines.shift().trim();
+        processData(line);
+      }
+      dataBuffer = lines[0];
+    } catch (err) {
+      console.error("Read error:", err);
     }
+  }
 }
 
-function updateTrafficLight() {
-    let redLED = document.querySelector(".led.red");
-    let yellowLED = document.querySelector(".led.yellow");
-    let greenLED = document.querySelector(".led.green");
+function processData(data) {
+  console.log("Received Data:", data);
+  let parts = data.split(",");
+  if (parts.length !== 5) return;
 
-    redLED.classList.remove("active");
-    yellowLED.classList.remove("active");
-    greenLED.classList.remove("active");
+  currentMode = parseInt(parts[0]);
+  document.getElementById("modeText").textContent = currentMode;
+  document.getElementById("brightnessValue").textContent = parts[4];
 
-    switch (ledState) {
-        case "RED":
-            redLED.classList.add("active");
-            break;
-        case "YELLOW":
-            yellowLED.classList.add("active");
-            break;
-        case "GREEN":
-            greenLED.classList.add("active");
-            break;
-        case "ALL_ON":
-            redLED.classList.add("active");
-            yellowLED.classList.add("active");
-            greenLED.classList.add("active");
-            break;
-        case "OFF":
-        case "ALL_OFF":
-            break; // 모든 LED 끄기 (기본 상태 유지)
-    }
-}
+  let redState = parseInt(parts[1]);
+  let yellowState = parseInt(parts[2]);
+  let greenState = parseInt(parts[3]);
 
-function gotList(portList) {
-    console.log("Available Serial Ports:", portList);
+  document.getElementById("redLed").classList.toggle("on", redState);
+  document.getElementById("yellowLed").classList.toggle("on", yellowState);
+  document.getElementById("greenLed").classList.toggle("on", greenState);
 }
