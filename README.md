@@ -6,7 +6,7 @@
 
 ## 작동 영상 링크
 
-[![유튜브 썸네일](https://img.youtube.com/vi/CZGQBcTGbE4&t=1s/0.jpg)](https://www.youtube.com/watch?v=CZGQBcTGbE4&t=1s)
+[![유튜브 썸네일](https://img.youtube.com/vi/CZGQBcTGbE4/0.jpg)](https://www.youtube.com/watch?v=CZGQBcTGbE4&t=1s)
 
 ---
 
